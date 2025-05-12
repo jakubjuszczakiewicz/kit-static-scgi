@@ -1113,8 +1113,13 @@ ssize_t write_output(struct request_desc * desc, int outfd)
   }
 
   ssize_t w = write(outfd, desc->response_buffer, desc->response_buffer_size);
-  if (w > 0)
+  if (w > 0) {
+    if (w < desc->response_buffer_size) {
+      memmove(desc->response_buffer, &desc->response_buffer[w],
+          desc->response_buffer_size - w);
+    }
     desc->response_buffer_size -= w;
+  }
   return w;
 }
 
