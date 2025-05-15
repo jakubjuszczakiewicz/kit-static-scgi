@@ -1,4 +1,4 @@
-/* Copyright (c) 2024 Krypto-IT Jakub Juszczakiewicz
+/* Copyright (c) 2025 Krypto-IT Jakub Juszczakiewicz
  * All rights reserved.
  */
 

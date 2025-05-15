@@ -1,4 +1,4 @@
-/* Copyright (c) 2024 Krypto-IT Jakub Juszczakiewicz
+/* Copyright (c) 2025 Krypto-IT Jakub Juszczakiewicz
  * All rights reserved.
  */
 
@@ -43,10 +43,6 @@
 #define MAX_THREADS 16
 #endif
 
-#ifndef MAX_PARALLEL_ON_DEMAND
-#define MAX_PARALLEL_ON_DEMAND 8
-#endif
-
 #define HEADER_CONTENT_TYPE     "Content-Type: %s\r\n"
 #define HEADER_CONTENT_TYPE_PT  "Content-Type: text/plain\r\n"
 #define HEADER_CONTENT_LENGHT   "Content-Lenght: %llu\r\n"
@@ -64,43 +60,25 @@
 #ifndef ZSTD_CMD
 #define ZSTD_CMD "zstd --no-progress --ultra -22"
 #endif
-#ifndef ZSTD_FAST_CMD
-#define ZSTD_FAST_CMD "zstd --no-progress -3"
-#endif
 
 #ifndef BROTLI_CMD
 #define BROTLI_CMD "brotli -Z"
-#endif
-#ifndef BROTLI_FAST_CMD
-#define BROTLI_FAST_CMD "brotli -3"
 #endif
 
 #ifndef GZIP_CMD
 #define GZIP_CMD "gzip -9"
 #endif
-#ifndef GZIP_FAST_CMD
-#define GZIP_FAST_CMD "gzip -5"
-#endif
 
 #ifndef ENV_ZSTD_CMD
 #define ENV_ZSTD_CMD "ZSTD_CMD"
-#endif
-#ifndef ENV_ZSTD_FAST_CMD
-#define ENV_ZSTD_FAST_CMD "ZSTD_FAST_CMD"
 #endif
 
 #ifndef ENV_BROTLI_CMD
 #define ENV_BROTLI_CMD "BROTLI_CMD"
 #endif
-#ifndef ENV_BROTLI_FAST_CMD
-#define ENV_BROTLI_FAST_CMD "BROTLI_FAST_CMD"
-#endif
 
 #ifndef ENV_GZIP_CMD
 #define ENV_GZIP_CMD "GZIP_CMD"
-#endif
-#ifndef ENV_GZIP_FAST_CMD
-#define ENV_GZIP_FAST_CMD "GZIP_FAST_CMD"
 #endif
 
 #ifdef HAVE_LOGS
@@ -136,7 +114,6 @@ struct request_desc {
   enum output_encode content_encode;
   char buffer[MAX_HEADER_LINE_SIZE];
   size_t buffer_fill;
-  pid_t ondemand_pid;
 
   int response_sock;
   char response_buffer[MAX_RESPONS_BUFFER_SIZE];
@@ -164,10 +141,6 @@ const char * brotli_cmd = BROTLI_CMD;
 const char * zstd_cmd = ZSTD_CMD;
 const char * gzip_cmd = GZIP_CMD;
 
-const char * brotli_fast_cmd = BROTLI_FAST_CMD;
-const char * zstd_fast_cmd = ZSTD_FAST_CMD;
-const char * gzip_fast_cmd = GZIP_FAST_CMD;
-
 const char * pid_file;
 const char * log_file;
 
@@ -188,11 +161,11 @@ struct queue_t {
   int outfd;
   char in_path[MAX_FILE_PATH];
 } queue[QUEUE_SIZE];
-size_t queue_fill;
+volatile size_t queue_fill;
 sem_t queue_sem;
 sem_t queue_worker_sem;
 
-size_t min_threads = 0, max_threads = 1, cur_threads = 0, wait_threads = 0;
+volatile size_t min_threads = 0, max_threads = 1, cur_threads = 0, wait_threads = 0;
 pthread_t thread[MAX_THREADS];
 
 struct subprocess_desc {
@@ -202,8 +175,7 @@ struct subprocess_desc {
 } subprocess_data[MAX_THREADS];
 sem_t missing_pid_sem;
 
-size_t cur_on_demand = 0;
-size_t cur_requests = 0;
+volatile size_t cur_requests = 0;
 
 void update_xattr_counter(int fd, const char * name)
 {
@@ -312,8 +284,8 @@ void signal_child(int unused)
   sem_wait(&missing_pid_sem);
   for (size_t i = 0; i < MAX_THREADS; i++) {
     if (subprocess_data[i].exec_pid == p) {
-      sem_post(&missing_pid_sem);
       sem_post(&subprocess_data[i].exec_sem);
+      sem_post(&missing_pid_sem);
       return;
     }
   }
@@ -328,12 +300,6 @@ int fake_close(struct request_desc * f)
 ssize_t fake_fread(void * buf, size_t size, struct request_desc * desc)
 {
   return -1;
-}
-
-int p_close(struct request_desc * desc)
-{
-  cur_on_demand--;
-  return close(desc->response_sock);
 }
 
 ssize_t call_read(void * buf, size_t size, struct request_desc * desc)
@@ -600,26 +566,33 @@ void enqueue_uri(const char * path, enum output_encode encode,
   size_t path_tmp_len = SSPRINTF(path_tmp, "%s%s.%s.tmp", cache_dir, uri, ext);
 
   int r = stat(path_tmp, &st);
-  if (r == 0)
+  if (r == 0) {
+    PRINTF_LOG("\"%s\" exists", path_tmp);
     return;
+  }
   path_tmp[path_tmp_len - 4] = 0;
   r = stat(path_tmp, &st);
-  if (r == 0)
+  if (r == 0) {
+    PRINTF_LOG("\"%s\" exists", path_tmp);
     return;
+  }
   path_tmp[path_tmp_len - 4] = '.';
 
   int f = creat(path_tmp, S_IRUSR | S_IWUSR | S_IRGRP);
   if (f < 0) {
     check_dir(path_tmp);
     f = creat(path_tmp, S_IRUSR | S_IWUSR | S_IRGRP);
-    if (f < 0)
+    if (f < 0) {
+      PRINTF_LOG("\"%s\" not exists", path_tmp);
       return;
+    }
   }
   set_xattr_counter(f, XATTR_PREV_COUNTER_NAME, counter);
   set_xattr_counter(f, XATTR_COUNTER_NAME, 0);
 
   if (sem_wait(&queue_sem) < 0) {
     close(f);
+    PRINTF_LOG("\"%s\" sem_wait fail", path_tmp);
     return;
   }
 
@@ -630,14 +603,14 @@ void enqueue_uri(const char * path, enum output_encode encode,
     strncpy(queue[queue_fill].in_path, path, MAX_FILE_PATH);
     queue_fill++;
 
-    if (queue_fill > cur_threads) {
+    if (queue_fill > cur_threads - wait_threads) {
       size_t j = -1;
-      for (size_t i = cur_threads; (i < max_threads) && (i < queue_fill); i++) {
+      for (size_t i = cur_threads; i - wait_threads <= max_threads; i++) {
         for (j++; j < MAX_THREADS; j++) {
           if (!thread[j]) {
             atomic_store(&subprocess_data[j].thread_wait, 0);
             pthread_create(&thread[j], NULL, worker_thread,
-                &subprocess_data[j].thread_wait);
+                &subprocess_data[j]);
             cur_threads++;
             break;
           }
@@ -648,58 +621,6 @@ void enqueue_uri(const char * path, enum output_encode encode,
 
   sem_post(&queue_sem);
   sem_post(&queue_worker_sem);
-}
-
-int response_fast(struct request_desc * desc, const char * plain_path,
-    const char * fast_cmd, const char * encode_str, const char * mime,
-    enum output_encode encode, const char * etag, unsigned long long counter)
-{
-  if (cur_on_demand >=  MAX_PARALLEL_ON_DEMAND) {
-    struct timespec ts;
-    uint64_t plain_fsize;
-    get_fsize_and_mod_time(&ts, &plain_fsize, plain_path);
-    enqueue_uri(plain_path, encode, counter);
-    return response_plain(desc, plain_path, plain_fsize, mime, etag);
-  }
-
-  desc->response_buffer_size = snprintf(desc->response_buffer,
-      MAX_RESPONS_BUFFER_SIZE,
-      "Status: 200 OK\r\n"
-      HEADER_CONTENT_TYPE
-      HEADER_CONTENT_ENCODING
-      HEADER_ETAG
-      HEADER_ACCEPT_RANGES
-      HEADER_X_KIT_SERVICE
-      "\r\n", mime, encode_str, etag, version_str);
-  if (desc->method == METHOD_GET) {
-    desc->close = p_close;
-    desc->fread = call_read;
-    struct int_exec_t stat;
-    int input = open(plain_path, O_RDONLY);
-    if ((input <= 0) ||
-        (int_exec(&stat, input, strlen(fast_cmd), fast_cmd) < 0)) {
-      struct timespec ts;
-      uint64_t plain_fsize;
-      get_fsize_and_mod_time(&ts, &plain_fsize, plain_path);
-      enqueue_uri(plain_path, encode, counter);
-      if (input > 0)
-        close(input);
-      return response_plain(desc, plain_path, plain_fsize, mime, etag);
-    }
-    if (input > 0) {
-      update_xattr_counter(input, XATTR_COUNTER_NAME);
-      close(input);
-    }
-    desc->response_sock = stat.stdout_fd;
-    PRINTF_LOG("200 fast %s GET \"%s\"", encode_str, plain_path);
-    cur_on_demand++;
-  } else {
-    desc->close = fake_close;
-    desc->fread = fake_fread;
-  }
-
-  enqueue_uri(plain_path, encode, counter);
-  return 0;
 }
 
 int response_compressed(struct request_desc * desc, const char * path,
@@ -806,7 +727,7 @@ int choose_file(struct request_desc * desc)
   }
 
   char * encoded_path;
-  const char * fast_cmd, * encode_str;
+  const char * encode_str;
 
   encoded_path = alloca(cache_dir_len + uri_len + host_len + 5);
   memcpy(encoded_path, cache_dir, cache_dir_len);
@@ -818,35 +739,36 @@ int choose_file(struct request_desc * desc)
 
   if (desc->content_encode == ENCODE_GZIP) {
     memcpy(encoded_path + cache_dir_len + host_len + uri_len, ".gz", 4);
-    fast_cmd = gzip_fast_cmd;
     encode_str = "gzip";
   } else if (desc->content_encode == ENCODE_BROTLI) {
     memcpy(encoded_path + cache_dir_len + host_len + uri_len, ".br", 4);
-    fast_cmd = brotli_fast_cmd;
     encode_str = "br";
   } else if (desc->content_encode == ENCODE_ZSTD) {
     memcpy(encoded_path + cache_dir_len + host_len + uri_len, ".zst", 5);
-    fast_cmd = zstd_fast_cmd;
     encode_str = "zstd";
   }
 
   struct timespec encoded_ts;
   uint64_t encoded_fsize;
+
   if (get_fsize_and_mod_time(&encoded_ts, &encoded_fsize, encoded_path) < 0) {
     if (errno == ENOENT) {
-      return response_fast(desc, plain_path, fast_cmd, encode_str,
-        get_mime_from_ext(plain_path), desc->content_encode, etag, 0);
+      enqueue_uri(plain_path, desc->content_encode, 0);
+      return response_plain(desc, plain_path, plain_fsize,
+        get_mime_from_ext(plain_path), etag);
     }
     return response_invalid_request(desc);
   }
 
   if ((encoded_ts.tv_sec < plain_ts.tv_sec) ||
-      (encoded_ts.tv_sec == plain_ts.tv_sec) &&
-      (encoded_ts.tv_nsec < plain_ts.tv_nsec)) {
+      ((encoded_ts.tv_sec == plain_ts.tv_sec) &&
+      (encoded_ts.tv_nsec < plain_ts.tv_nsec))) {
     unsigned long long counter = get_xattr_prev_counter(encoded_path);
     unlink(encoded_path);
-    return response_fast(desc, plain_path, fast_cmd, encode_str,
-        get_mime_from_ext(plain_path), desc->content_encode, etag, counter);
+    enqueue_uri(plain_path, desc->content_encode, counter);
+
+    return response_plain(desc, plain_path, plain_fsize,
+        get_mime_from_ext(plain_path), etag);
   }
 
   return response_compressed(desc, encoded_path, encoded_fsize, encode_str,
@@ -1210,11 +1132,8 @@ int main(int argc, char * argv[])
   daemon(0, 0);
 
   check_env(ENV_ZSTD_CMD, &zstd_cmd);
-  check_env(ENV_ZSTD_FAST_CMD, &zstd_fast_cmd);
   check_env(ENV_BROTLI_CMD, &brotli_cmd);
-  check_env(ENV_BROTLI_FAST_CMD, &brotli_fast_cmd);
   check_env(ENV_GZIP_CMD, &gzip_cmd);
-  check_env(ENV_GZIP_FAST_CMD, &gzip_fast_cmd);
 
   if (pid_file) {
     FILE * f = fopen(pid_file, "w");
@@ -1260,7 +1179,7 @@ int main(int argc, char * argv[])
   for (size_t i = 0; i < min_threads; i++) {
     atomic_store(&subprocess_data[i].thread_wait, 0);
     pthread_create(&thread[i], NULL, worker_thread,
-        &subprocess_data[i].thread_wait);
+        &subprocess_data[i]);
   }
   for (size_t i = min_threads; i < MAX_THREADS; i++) {
     atomic_store(&subprocess_data[i].thread_wait, 0);
