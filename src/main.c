@@ -45,7 +45,7 @@
 
 #define HEADER_CONTENT_TYPE     "Content-Type: %s\r\n"
 #define HEADER_CONTENT_TYPE_PT  "Content-Type: text/plain\r\n"
-#define HEADER_CONTENT_LENGHT   "Content-Lenght: %llu\r\n"
+#define HEADER_CONTENT_LENGHT   "Content-Length: %llu\r\n"
 #define HEADER_CONTENT_ENCODING "Content-Encoding: %s\r\n"
 #define HEADER_ETAG             "ETag: \"%s\"\r\n"
 #define HEADER_X_KIT_SERVICE    "X-KIT-Service: kit-static-scgi/%s\r\n"
